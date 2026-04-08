@@ -16,6 +16,11 @@ It also depends on ncurses, available from:
 
 	https://invisible-mirror.net/archives/ncurses/
 
+On macOS, utf8proc is strongly recommended for correct Unicode and emoji
+support. It is available from Homebrew:
+
+	$ brew install utf8proc
+
 To build tmux, a C compiler (for example gcc or clang), make, pkg-config and a
 suitable yacc (yacc or bison) are needed.
 
@@ -25,6 +30,14 @@ To build and install tmux from a release tarball, use:
 
 	$ ./configure && make
 	$ sudo make install
+
+On macOS, configure requires an explicit utf8proc flag. To build with utf8proc
+(recommended):
+
+	$ ./configure --enable-utf8proc && make
+	$ sudo make install
+
+To build without utf8proc on macOS, use --disable-utf8proc instead.
 
 tmux can use the utempter library to update utmp(5), if it is installed - run
 configure with --enable-utempter to enable this.

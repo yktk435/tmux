@@ -464,10 +464,41 @@ screen_redraw_make_pane_status(struct client *c, struct window_pane *wp,
 	ft = format_create(c, NULL, FORMAT_PANE|wp->id, FORMAT_STATUS);
 	format_defaults(ft, c, c->session, c->session->curw, wp);
 
-	if (wp == server_client_get_pane(c))
-		style_apply(&gc, w->options, "pane-active-border-style", ft);
-	else
-		style_apply(&gc, w->options, "pane-border-style", ft);
+	struct window_pane	*active = server_client_get_pane(c);
+	struct grid_cell	 active_gc, inactive_gc;
+	u_int			 a_left, a_right;
+	int			 has_shared_border = 0;
+
+	style_apply(&active_gc, w->options, "pane-active-border-style", ft);
+	style_apply(&inactive_gc, w->options, "pane-border-style", ft);
+
+	/*
+	 * Precompute active pane's border range on this status row.
+	 * screen_redraw_pane_border() excludes the pane-border-status row,
+	 * so we check geometry directly.
+	 */
+	if (wp != active) {
+		/*
+		 * Check if this pane's status row is the same row as
+		 * the active pane's adjacent border:
+		 *   top:    status at wp->yoff-1, active bottom at active->yoff+active->sy
+		 *   bottom: status at wp->yoff+wp->sy, active top at active->yoff-1
+		 */
+		if (pane_status == PANE_STATUS_TOP &&
+		    wp->yoff - 1 == active->yoff + active->sy) {
+			a_left = (active->xoff > 0) ?
+			    active->xoff - 1 : active->xoff;
+			a_right = active->xoff + active->sx;
+			has_shared_border = 1;
+		} else if (pane_status == PANE_STATUS_BOTTOM &&
+		    wp->yoff + wp->sy == active->yoff - 1) {
+			a_left = (active->xoff > 0) ?
+			    active->xoff - 1 : active->xoff;
+			a_right = active->xoff + active->sx;
+			has_shared_border = 1;
+		}
+	}
+
 	fmt = options_get_string(wp->options, "pane-border-format");
 
 	expanded = format_expand_time(ft, fmt);
@@ -483,11 +514,21 @@ screen_redraw_make_pane_status(struct client *c, struct window_pane *wp,
 	screen_write_start(&ctx, &wp->status_screen);
 
 	for (i = 0; i < width; i++) {
+		int	is_active;
+
 		px = wp->xoff + 2 + i;
 		if (pane_status == PANE_STATUS_TOP)
 			py = wp->yoff - 1;
 		else
 			py = wp->yoff + wp->sy;
+		is_active = (wp == active);
+		if (!is_active && has_shared_border &&
+		    px >= a_left && px <= a_right)
+			is_active = 1;
+		if (is_active)
+			memcpy(&gc, &active_gc, sizeof gc);
+		else
+			memcpy(&gc, &inactive_gc, sizeof gc);
 		cell_type = screen_redraw_type_of_cell(rctx, px, py);
 		screen_redraw_border_set(w, wp, pane_lines, cell_type, &gc);
 		screen_write_cell(&ctx, &gc);
@@ -497,6 +538,58 @@ screen_redraw_make_pane_status(struct client *c, struct window_pane *wp,
 	screen_write_cursormove(&ctx, 0, 0, 0);
 	style_ranges_free(&sle->ranges);
 	format_draw(&ctx, &gc, width, expanded, &sle->ranges, 0);
+
+	/* Re-fill padding spaces (edges only) with border characters. */
+	for (i = 0; i < width; i++) {
+		struct grid_cell	tmp_gc;
+		int			is_active;
+
+		grid_get_cell(wp->status_screen.grid, i, 0, &tmp_gc);
+		if (tmp_gc.data.size != 1 || tmp_gc.data.data[0] != ' ')
+			break;
+		px = wp->xoff + 2 + i;
+		if (pane_status == PANE_STATUS_TOP)
+			py = wp->yoff - 1;
+		else
+			py = wp->yoff + wp->sy;
+		is_active = (wp == active);
+		if (!is_active && has_shared_border &&
+		    px >= a_left && px <= a_right)
+			is_active = 1;
+		if (is_active)
+			memcpy(&gc, &active_gc, sizeof gc);
+		else
+			memcpy(&gc, &inactive_gc, sizeof gc);
+		cell_type = screen_redraw_type_of_cell(rctx, px, py);
+		screen_redraw_border_set(w, wp, pane_lines, cell_type, &gc);
+		screen_write_cursormove(&ctx, i, 0, 0);
+		screen_write_cell(&ctx, &gc);
+	}
+	for (i = width; i > 0; i--) {
+		struct grid_cell	tmp_gc;
+		int			is_active;
+
+		grid_get_cell(wp->status_screen.grid, i - 1, 0, &tmp_gc);
+		if (tmp_gc.data.size != 1 || tmp_gc.data.data[0] != ' ')
+			break;
+		px = wp->xoff + 2 + (i - 1);
+		if (pane_status == PANE_STATUS_TOP)
+			py = wp->yoff - 1;
+		else
+			py = wp->yoff + wp->sy;
+		is_active = (wp == active);
+		if (!is_active && has_shared_border &&
+		    px >= a_left && px <= a_right)
+			is_active = 1;
+		if (is_active)
+			memcpy(&gc, &active_gc, sizeof gc);
+		else
+			memcpy(&gc, &inactive_gc, sizeof gc);
+		cell_type = screen_redraw_type_of_cell(rctx, px, py);
+		screen_redraw_border_set(w, wp, pane_lines, cell_type, &gc);
+		screen_write_cursormove(&ctx, i - 1, 0, 0);
+		screen_write_cell(&ctx, &gc);
+	}
 
 	screen_write_stop(&ctx);
 	format_free(ft);
@@ -851,6 +944,31 @@ screen_redraw_draw_borders_cell(struct screen_redraw_ctx *ctx, u_int i, u_int j)
 		if (tmp == NULL)
 			return;
 		memcpy(&gc, tmp, sizeof gc);
+
+		/*
+		 * On pane-border-status rows, screen_redraw_pane_border()
+		 * excludes the status row from BORDER_TOP/BOTTOM, so
+		 * border_gc may be wrong for cells adjacent to the active
+		 * pane. Re-check with direct geometry.
+		 */
+		if (ctx->pane_status != PANE_STATUS_OFF) {
+			u_int	ay;
+
+			if (ctx->pane_status == PANE_STATUS_TOP)
+				ay = active->yoff + active->sy;
+			else
+				ay = active->yoff - 1;
+			if (y == ay &&
+			    x >= (active->xoff > 0 ? active->xoff - 1 :
+			    active->xoff) &&
+			    x <= active->xoff + active->sx) {
+				ft = format_create_defaults(NULL, c, s,
+				    s->curw, wp);
+				style_apply(&gc, oo,
+				    "pane-active-border-style", ft);
+				format_free(ft);
+			}
+		}
 
 		if (server_is_marked(s, s->curw, marked_pane.wp) &&
 		    screen_redraw_check_is(ctx, x, y, marked_pane.wp))
